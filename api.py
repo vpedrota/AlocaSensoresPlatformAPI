@@ -11,6 +11,33 @@ from shapely.ops import unary_union
 from shapely.geometry import mapping
 from shapely.ops import transform
 from functools import partial
+from pyproj import Transformer
+import numpy as np
+
+trans = Transformer.from_crs( 
+    "epsg:4326",
+    "+proj=utm +zone=23 +ellps=WGS84",
+    always_xy=True,
+)
+
+def distance_cal(a, b) -> float:
+    """ Função para retornar a distância entre dois pontos.
+
+    Args:
+        a (np.array): lista com coordenadas que descreve um ponto.
+        b (np.array): lista com coordenadas que descreve um ponto.
+
+    Returns:
+        float: Distância entre os dois pontos como parâmetro.
+
+
+    Exemplos:
+    ---------
+
+    >>> distance([1. , 1.], [4.333332, 24])
+    23.240290493499085
+    """ 
+    return abs(np.linalg.norm(a-b))
 
 app = Flask(__name__)
 CORS(app)
@@ -101,8 +128,11 @@ def process_geojson():
         x = LpVariable.dicts("X", [(i, j) for i in range(len(pontos_atendimento)) for j in range(len(facilidades))], 0, 1, LpBinary)
         y = LpVariable.dicts("Y", [j for j in range(len(facilidades))], 0, 1, LpBinary)
 
+        # Obtém os pesos da feature
+        pesos = features[0]['properties']['novoCampo']
+
         # Adicione a função objetivo.
-        prob += lpSum([lpSum([x[(i, j)] * distances[i][j] for j in range(len(facilidades))]) for i in range(len(pontos_atendimento))])
+        prob += lpSum([lpSum([x[(i, j)] * distances[i][j] * pesos[i]['pop'] for j in range(len(facilidades))]) for i in range(len(pontos_atendimento))])
 
         # Adicione a restrição de que cada ponto deve ser atribuído a exatamente uma facilidade.
         for i in range(len(pontos_atendimento)):
@@ -192,72 +222,66 @@ def process_mclp():
         # Obtém os pontos das duas features
         points1 = features[0]['geometry']['coordinates'] 
         points2 = features[1]['geometry']['coordinates'] 
-
-        # Obtém os pesos da feature
         pesos = features[0]['properties']['novoCampo']
-        print(pesos)
-
-        # Geração aleatória de dados 
-        facilities = points2
-        demands = points1
-        n_facilities = len(facilities)
-        n_demands = len(demands)
-       
-        range_to_cover = 2000  # Distância para cobrir a demanda
-
-        # Calcula a matriz de distâncias em UTM
+        S = 2000
+        I = list(range(0, len(points1)))
+        J = list(range(0, len(points2)))
+        P = features[1]['properties']['p']
         distances = []
         for point1 in points1:
             row = []
+
             for point2 in points2:
                 distance = calculate_distance(point1, point2)
                 row.append(distance)
+
             distances.append(row)
+        
 
-        # Definir o problema
+        N = [[j for j in J if distances[i][j] < S] for i in I]
+
         prob = LpProblem("MCLP", LpMaximize)
+        x = LpVariable.dicts("x", J, 0)
+        y = LpVariable.dicts("y", I, 0)
 
-        # Variáveis de decisão
-        x = LpVariable.dicts("x", range(n_facilities), cat='Binary')
-        y = LpVariable.dicts("y", (range(n_facilities), range(n_demands)), cat='Binary')
+        # Objective
+        prob += lpSum([y[i]*pesos[i]['impacto']*pesos[i]['pop'] for i in I])
 
-        # Função objetivo
-        prob += lpSum([y[i][j] * pesos[j]['pop'] * pesos[j]['impacto'] for i in range(n_facilities) for j in range(n_demands)])
+        # Constraints
+        for i in I:
+            prob += lpSum([x[j] for j in N[i]]) >= y[i]
 
-        # Restrições
-        for j in range(n_demands):
-            prob += lpSum([y[i][j] for i in range(n_facilities)]) >= 1
+        for j in J:
+            prob += x[j] <= 1
+            prob += x[j] >= 0
 
-        for i in range(n_facilities):
-            for j in range(n_demands):
-                prob += y[i][j] <= x[i]
+        for i in I:
+            prob += y[i] <= 1
+            prob += y[i] >= 0
 
-        for j in range(n_demands):
-            for i in range(n_facilities):
-                prob += y[i][j] <= 1 if distances[j][i] <= range_to_cover else 0
+        prob += lpSum([x[j] for j in J]) == P
 
-        # Quantidade de facilidades disponíveis
-        facilities_available = features[1]['properties']["p"]
 
-        # Restrição de disponibilidade das facilidades
-        prob += lpSum([x[i] for i in range(n_facilities)]) <= facilities_available
-
+        # Solve problem
         prob.solve()
+
+        x_soln = np.array([x[j].varValue for j in J])
+        print(x_soln)
 
         # Criando uma lista de círculos
         circles = []
         # Resultado
-        for i in range(n_facilities):
-            if x[i].varValue > 0.5:
-                print((f"Facilidade alocada na localização {facilities[i]}"))
-                point = Point(facilities[i][0], facilities[i][1])
+        for i in range(len(x_soln)):
+            print(x[i].varValue)
+            if x_soln[i] > 0.5:
+                print((f"Facilidade alocada na localização {points2[i]}"))
+                point = Point(points2[i][0], points2[i][1])
                 circle = create_circle_in_meters(point, 2000)  # Cria um círculo de raio 2000 metros
                 circles.append(circle)
 
         # Unindo todos os círculos em um MultiPolygon
         multi_polygon = unary_union(circles)
         feature = geojson.Feature(geometry=mapping(multi_polygon))
-        print(feature)
         FeatureCollection = {
             "type": "FeatureCollection",
             "features": [feature, feature]
@@ -268,4 +292,4 @@ def process_mclp():
         return str(e), 400
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=8000)
