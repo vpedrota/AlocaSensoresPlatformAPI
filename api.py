@@ -177,7 +177,7 @@ def process_mclp():
             raise ValueError('Entrada inválida. O objeto deve ser um GeoJSON do tipo "FeatureCollection".')
 
         features = data.get('features')
-
+        
         # Verifica se existem exatamente duas features dentro do FeatureCollection
         if not isinstance(features, list) or len(features) != 2:
             raise ValueError('Entrada inválida. O FeatureCollection deve conter exatamente duas features.')
@@ -192,6 +192,10 @@ def process_mclp():
         # Obtém os pontos das duas features
         points1 = features[0]['geometry']['coordinates'] 
         points2 = features[1]['geometry']['coordinates'] 
+
+        # Obtém os pesos da feature
+        pesos = features[0]['properties']['novoCampo']
+        print(pesos)
 
         # Geração aleatória de dados 
         facilities = points2
@@ -218,7 +222,7 @@ def process_mclp():
         y = LpVariable.dicts("y", (range(n_facilities), range(n_demands)), cat='Binary')
 
         # Função objetivo
-        prob += lpSum([y[i][j] for i in range(n_facilities) for j in range(n_demands)])
+        prob += lpSum([y[i][j] * pesos[j]['pop'] * pesos[j]['impacto'] for i in range(n_facilities) for j in range(n_demands)])
 
         # Restrições
         for j in range(n_demands):
@@ -264,4 +268,4 @@ def process_mclp():
         return str(e), 400
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=8000, debug=True)
